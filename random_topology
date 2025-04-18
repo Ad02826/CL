@@ -1,89 +1,134 @@
 #include "ns3/core-module.h"
 #include "ns3/network-module.h"
+#include "ns3/csma-module.h"
 #include "ns3/internet-module.h"
-#include "ns3/mobility-module.h"
-#include "ns3/point-to-point-module.h"
-#include "ns3/applications-module.h"
+#include "ns3/ipv4-address-helper.h"
 #include "ns3/flow-monitor-module.h"
+#include "ns3/on-off-helper.h"
+#include "ns3/packet-sink-helper.h"
+#include <fstream>
 
 using namespace ns3;
 
-NS_LOG_COMPONENT_DEFINE ("RandomTopologySimulation");
+NS_LOG_COMPONENT_DEFINE("RandomTopologySimulation");
 
-int main (int argc, char *argv[])
-{
-    // 设置仿真时长
-    double simulationTime = 3600.0; // 1 小时 = 3600 秒
+void WriteFlowMonitorDataToCSV(Ptr<FlowMonitor> monitor, double simTime, Ipv4InterfaceContainer interfaces) {
+    NS_LOG_INFO("正在将FlowMonitor数据写入CSV文件...");
+    std::ofstream outputFile("/srv/samba/ns3_share/network_metrics.csv");
+    if (outputFile.is_open()) {
+        NS_LOG_INFO("成功打开文件进行写入。");
+        outputFile << "FlowID,SourceAddress,DestinationAddress,PacketsSent,PacketsReceived,BytesSent,BytesReceived,Throughput,SimulationTime,RTT,LossType\n";
 
-    // 设置节点数量
-    uint32_t numNodes = 50;
+        std::map<FlowId, FlowMonitor::FlowStats> stats = monitor->GetFlowStats();
+        NS_LOG_INFO("已获取流量统计数据，总流量数量：" << stats.size());
 
-    // 初始化日志
-    LogComponentEnable ("RandomTopologySimulation", LOG_LEVEL_INFO);
+        for (auto &flow : stats) {
+            FlowId flowId = flow.first;
+            FlowMonitor::FlowStats stat = flow.second;
 
-    // 创建节点
-    NodeContainer nodes;
-    nodes.Create (numNodes);
+            // 获取源和目标地址
+            Ipv4Address sourceAddr = interfaces.GetAddress(flowId % interfaces.GetN()); // 根据流ID获取源地址
+            Ipv4Address destAddr = interfaces.GetAddress((flowId + 1) % interfaces.GetN()); // 根据流ID获取目标地址
 
-    // 创建 P2P 网络链路
-    PointToPointHelper p2p;
-    p2p.SetDeviceAttribute ("DataRate", StringValue ("5Mbps"));
-    p2p.SetChannelAttribute ("Delay", StringValue ("2ms"));
+            // 计算吞吐量 (每秒字节数)
+            double throughput = (stat.rxBytes * 8.0) / (stat.timeLastRxPacket.GetSeconds() - stat.timeFirstTxPacket.GetSeconds());
 
-    // 随机拓扑：连接随机选择的节点对
-    NetDeviceContainer devices;
-    for (uint32_t i = 0; i < numNodes; i++)
-    {
-        for (uint32_t j = i + 1; j < numNodes; j++)
-        {
-            if (i != j)
-            {
-                NetDeviceContainer devicePair = p2p.Install (nodes.Get (i), nodes.Get (j));
-                devices.Add (devicePair);
+            // 计算RTT（往返时间）
+            double rtt = (stat.timeLastRxPacket.GetSeconds() - stat.timeFirstTxPacket.GetSeconds()) * 1000.0; // 转换为毫秒
+
+            // 判断丢包类型
+            std::string lossType = "Unknown";
+            if (stat.lostPackets > 0) {
+                if (stat.txPackets > stat.rxPackets) {
+                    lossType = "Congestion";
+                } else {
+                    lossType = "Random";
+                }
             }
+
+            outputFile << flowId << ","
+                       << sourceAddr << ","
+                       << destAddr << ","
+                       << stat.txPackets << ","
+                       << stat.rxPackets << ","
+                       << stat.txBytes << ","
+                       << stat.rxBytes << ","
+                       << throughput << ","
+                       << simTime << ","
+                       << rtt << ","
+                       << lossType << "\n";
         }
+        outputFile.close();
+        NS_LOG_INFO("FlowMonitor数据成功写入CSV文件。");
+    } else {
+        NS_LOG_ERROR("无法打开文件进行写入FlowMonitor数据。");
+    }
+}
+
+int main(int argc, char *argv[]) {
+    uint32_t numNodes = 50;  // 默认节点数
+    double simTime = 30;   // 默认仿真时间 1小时
+
+    Time::SetResolution(Time::NS);
+    LogComponentEnable("RandomTopologySimulation", LOG_LEVEL_INFO);
+
+    NS_LOG_INFO("仿真开始...");
+
+    NodeContainer nodes;
+    nodes.Create(numNodes);
+    NS_LOG_INFO("成功创建 " << numNodes << " 个节点。");
+
+    CsmaHelper csma;
+    csma.SetChannelAttribute("DataRate", StringValue("100Mbps"));
+    csma.SetChannelAttribute("Delay", TimeValue(MilliSeconds(2)));
+
+    NetDeviceContainer devices;
+    devices = csma.Install(nodes);
+    NS_LOG_INFO("成功安装CSMA网络设备。");
+
+    InternetStackHelper internet;
+    internet.Install(nodes);
+    NS_LOG_INFO("成功安装Internet协议栈。");
+
+    Ipv4AddressHelper ipv4;
+    ipv4.SetBase("10.1.0.0", "255.255.255.0");
+    Ipv4InterfaceContainer interfaces = ipv4.Assign(devices);
+    NS_LOG_INFO("成功给节点分配IPv4地址。");
+
+    uint16_t port = 9;
+    OnOffHelper onoff("ns3::TcpSocketFactory", Address());
+    onoff.SetAttribute("DataRate", StringValue("500kb/s"));
+    onoff.SetAttribute("PacketSize", UintegerValue(1024));
+    onoff.SetAttribute("MaxBytes", UintegerValue(0));
+
+    ApplicationContainer apps;
+    for (uint32_t i = 0; i < numNodes; ++i) {
+        AddressValue remoteAddress(InetSocketAddress(interfaces.GetAddress((i + 1) % numNodes), port));
+        onoff.SetAttribute("Remote", remoteAddress);
+        apps.Add(onoff.Install(nodes.Get(i)));
+
+        PacketSinkHelper sinkHelper("ns3::TcpSocketFactory", InetSocketAddress(Ipv4Address::GetAny(), port));
+        ApplicationContainer sinkApp = sinkHelper.Install(nodes.Get((i + 1) % numNodes));
+        sinkApp.Start(Seconds(0.0));
+        sinkApp.Stop(Seconds(simTime));
     }
 
-    // 安装互联网栈
-    InternetStackHelper internet;
-    internet.Install (nodes);
+    apps.Start(Seconds(1.0));
+    apps.Stop(Seconds(simTime));
 
-    // 配置 IP 地址分配
-    Ipv4AddressHelper address;
-    address.SetBase ("10.0.0.0", "255.255.255.0");
-    Ipv4InterfaceContainer interfaces = address.Assign (devices);
+    NS_LOG_INFO("随机流量生成应用已启动。");
 
-    // 设置随机流量：TCP 或 UDP 传输
-    uint32_t startNode = 0; // 流量源节点
-    uint32_t endNode = 1;   // 流量接收节点
-    OnOffHelper onOffHelper ("ns3::TcpSocketFactory", InetSocketAddress (interfaces.GetAddress (endNode), 8080));
-    onOffHelper.SetAttribute ("DataRate", StringValue ("1Mbps"));
-    onOffHelper.SetAttribute ("PacketSize", UintegerValue (1024));
-
-    ApplicationContainer app = onOffHelper.Install (nodes.Get (startNode));
-    app.Start (Seconds (1.0));
-    app.Stop (Seconds (simulationTime));
-
-    // 设置接收端应用（接收数据）
-    PacketSinkHelper packetSinkHelper ("ns3::TcpSocketFactory", InetSocketAddress (Ipv4Address::GetAny (), 8080));
-    app = packetSinkHelper.Install (nodes.Get (endNode));
-    app.Start (Seconds (0.0));
-    app.Stop (Seconds (simulationTime));
-
-    // 设置仿真时间
-    Simulator::Stop (Seconds (simulationTime));
-
-    // 启动仿真
-    Simulator::Run ();
-
-    // 打印统计信息
     FlowMonitorHelper flowmon;
-    Ptr<FlowMonitor> monitor = flowmon.InstallAll ();
-    monitor->CheckForLostPackets ();
-    monitor->SerializeToXmlFile ("flowmon.xml", true, true);
+    Ptr<FlowMonitor> monitor = flowmon.InstallAll();
 
-    // 结束仿真
-    Simulator::Destroy ();
+    Simulator::Stop(Seconds(simTime));
+    NS_LOG_INFO("开始运行仿真... 总时间: " << simTime << "秒");
+    Simulator::Run();
+    NS_LOG_INFO("仿真完成。");
 
+    WriteFlowMonitorDataToCSV(monitor, simTime, interfaces);
+
+    Simulator::Destroy();
+    NS_LOG_INFO("仿真结束并销毁。");
     return 0;
 }
