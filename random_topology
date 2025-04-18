@@ -17,7 +17,7 @@ void WriteFlowMonitorDataToCSV(Ptr<FlowMonitor> monitor, double simTime, Ipv4Int
     std::ofstream outputFile("/srv/samba/ns3_share/network_metrics.csv");
     if (outputFile.is_open()) {
         NS_LOG_INFO("成功打开文件进行写入。");
-        outputFile << "FlowID,SourceAddress,DestinationAddress,PacketsSent,PacketsReceived,BytesSent,BytesReceived,Throughput,SimulationTime,RTT,LossType\n";
+        outputFile << "FlowID,SourceAddress,DestinationAddress,PacketsSent,PacketsReceived,BytesSent,BytesReceived,SendTimestamp,ReceiveTimestamp,Bandwidth,Delay,PacketLossRate\n";
 
         std::map<FlowId, FlowMonitor::FlowStats> stats = monitor->GetFlowStats();
         NS_LOG_INFO("已获取流量统计数据，总流量数量：" << stats.size());
@@ -30,21 +30,18 @@ void WriteFlowMonitorDataToCSV(Ptr<FlowMonitor> monitor, double simTime, Ipv4Int
             Ipv4Address sourceAddr = interfaces.GetAddress(flowId % interfaces.GetN()); // 根据流ID获取源地址
             Ipv4Address destAddr = interfaces.GetAddress((flowId + 1) % interfaces.GetN()); // 根据流ID获取目标地址
 
-            // 计算吞吐量 (每秒字节数)
-            double throughput = (stat.rxBytes * 8.0) / (stat.timeLastRxPacket.GetSeconds() - stat.timeFirstTxPacket.GetSeconds());
+            // 获取发送和接收时间戳
+            double sendTimestamp = stat.timeFirstTxPacket.GetSeconds();
+            double receiveTimestamp = stat.timeLastRxPacket.GetSeconds();
 
-            // 计算RTT（往返时间）
-            double rtt = (stat.timeLastRxPacket.GetSeconds() - stat.timeFirstTxPacket.GetSeconds()) * 1000.0; // 转换为毫秒
+            // 计算带宽（字节数每秒）
+            double bandwidth = (stat.txBytes * 8.0) / (stat.timeLastRxPacket.GetSeconds() - stat.timeFirstTxPacket.GetSeconds());
 
-            // 判断丢包类型
-            std::string lossType = "Unknown";
-            if (stat.lostPackets > 0) {
-                if (stat.txPackets > stat.rxPackets) {
-                    lossType = "Congestion";
-                } else {
-                    lossType = "Random";
-                }
-            }
+            // 计算延迟（接收时间 - 发送时间）
+            double delay = receiveTimestamp - sendTimestamp;
+
+            // 计算丢包率
+            double packetLossRate = (stat.txPackets > 0) ? (static_cast<double>(stat.lostPackets) / stat.txPackets) : 0.0;
 
             outputFile << flowId << ","
                        << sourceAddr << ","
@@ -53,10 +50,11 @@ void WriteFlowMonitorDataToCSV(Ptr<FlowMonitor> monitor, double simTime, Ipv4Int
                        << stat.rxPackets << ","
                        << stat.txBytes << ","
                        << stat.rxBytes << ","
-                       << throughput << ","
-                       << simTime << ","
-                       << rtt << ","
-                       << lossType << "\n";
+                       << sendTimestamp << ","
+                       << receiveTimestamp << ","
+                       << bandwidth << ","
+                       << delay << ","
+                       << packetLossRate << "\n";
         }
         outputFile.close();
         NS_LOG_INFO("FlowMonitor数据成功写入CSV文件。");
