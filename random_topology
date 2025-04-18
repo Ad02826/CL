@@ -1,0 +1,89 @@
+#include "ns3/core-module.h"
+#include "ns3/network-module.h"
+#include "ns3/internet-module.h"
+#include "ns3/mobility-module.h"
+#include "ns3/point-to-point-module.h"
+#include "ns3/applications-module.h"
+#include "ns3/flow-monitor-module.h"
+
+using namespace ns3;
+
+NS_LOG_COMPONENT_DEFINE ("RandomTopologySimulation");
+
+int main (int argc, char *argv[])
+{
+    // 设置仿真时长
+    double simulationTime = 3600.0; // 1 小时 = 3600 秒
+
+    // 设置节点数量
+    uint32_t numNodes = 50;
+
+    // 初始化日志
+    LogComponentEnable ("RandomTopologySimulation", LOG_LEVEL_INFO);
+
+    // 创建节点
+    NodeContainer nodes;
+    nodes.Create (numNodes);
+
+    // 创建 P2P 网络链路
+    PointToPointHelper p2p;
+    p2p.SetDeviceAttribute ("DataRate", StringValue ("5Mbps"));
+    p2p.SetChannelAttribute ("Delay", StringValue ("2ms"));
+
+    // 随机拓扑：连接随机选择的节点对
+    NetDeviceContainer devices;
+    for (uint32_t i = 0; i < numNodes; i++)
+    {
+        for (uint32_t j = i + 1; j < numNodes; j++)
+        {
+            if (i != j)
+            {
+                NetDeviceContainer devicePair = p2p.Install (nodes.Get (i), nodes.Get (j));
+                devices.Add (devicePair);
+            }
+        }
+    }
+
+    // 安装互联网栈
+    InternetStackHelper internet;
+    internet.Install (nodes);
+
+    // 配置 IP 地址分配
+    Ipv4AddressHelper address;
+    address.SetBase ("10.0.0.0", "255.255.255.0");
+    Ipv4InterfaceContainer interfaces = address.Assign (devices);
+
+    // 设置随机流量：TCP 或 UDP 传输
+    uint32_t startNode = 0; // 流量源节点
+    uint32_t endNode = 1;   // 流量接收节点
+    OnOffHelper onOffHelper ("ns3::TcpSocketFactory", InetSocketAddress (interfaces.GetAddress (endNode), 8080));
+    onOffHelper.SetAttribute ("DataRate", StringValue ("1Mbps"));
+    onOffHelper.SetAttribute ("PacketSize", UintegerValue (1024));
+
+    ApplicationContainer app = onOffHelper.Install (nodes.Get (startNode));
+    app.Start (Seconds (1.0));
+    app.Stop (Seconds (simulationTime));
+
+    // 设置接收端应用（接收数据）
+    PacketSinkHelper packetSinkHelper ("ns3::TcpSocketFactory", InetSocketAddress (Ipv4Address::GetAny (), 8080));
+    app = packetSinkHelper.Install (nodes.Get (endNode));
+    app.Start (Seconds (0.0));
+    app.Stop (Seconds (simulationTime));
+
+    // 设置仿真时间
+    Simulator::Stop (Seconds (simulationTime));
+
+    // 启动仿真
+    Simulator::Run ();
+
+    // 打印统计信息
+    FlowMonitorHelper flowmon;
+    Ptr<FlowMonitor> monitor = flowmon.InstallAll ();
+    monitor->CheckForLostPackets ();
+    monitor->SerializeToXmlFile ("flowmon.xml", true, true);
+
+    // 结束仿真
+    Simulator::Destroy ();
+
+    return 0;
+}
