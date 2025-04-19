@@ -6,29 +6,39 @@
 #include "ns3/flow-monitor-module.h"
 #include "ns3/on-off-helper.h"
 #include "ns3/packet-sink-helper.h"
+#include "ns3/drop-tail-queue.h"
+#include "ns3/queue-disc.h"
 #include <fstream>
+#include <map>
 
 using namespace ns3;
 
 NS_LOG_COMPONENT_DEFINE("RandomTopologySimulation");
 
-void WriteFlowMonitorDataToCSV(Ptr<FlowMonitor> monitor, double simTime, Ipv4InterfaceContainer interfaces) {
+// 将FlowMonitor统计数据写入CSV文件
+void WriteFlowMonitorDataToCSV(Ptr<FlowMonitor> monitor, double simTime, Ipv4InterfaceContainer interfaces, std::map<uint32_t, uint32_t> queueSizeMap) {
     NS_LOG_INFO("正在将FlowMonitor数据写入CSV文件...");
+
+    // 打开文件并准备写入
     std::ofstream outputFile("/srv/samba/ns3_share/network_metrics.csv");
     if (outputFile.is_open()) {
         NS_LOG_INFO("成功打开文件进行写入。");
-        outputFile << "FlowID,SourceAddress,DestinationAddress,PacketsSent,PacketsReceived,BytesSent,BytesReceived,SendTimestamp,ReceiveTimestamp,Bandwidth,Delay,PacketLossRate\n";
 
+        // 写入CSV表头
+        outputFile << "FlowID,SourceAddress,DestinationAddress,PacketsSent,PacketsReceived,BytesSent,BytesReceived,SendTimestamp,ReceiveTimestamp,Bandwidth,Delay,PacketLossRate,QueueSize\n";
+
+        // 获取流量监控数据
         std::map<FlowId, FlowMonitor::FlowStats> stats = monitor->GetFlowStats();
         NS_LOG_INFO("已获取流量统计数据，总流量数量：" << stats.size());
 
+        // 遍历每个流的统计信息
         for (auto &flow : stats) {
             FlowId flowId = flow.first;
             FlowMonitor::FlowStats stat = flow.second;
 
             // 获取源和目标地址
-            Ipv4Address sourceAddr = interfaces.GetAddress(flowId % interfaces.GetN()); // 根据流ID获取源地址
-            Ipv4Address destAddr = interfaces.GetAddress((flowId + 1) % interfaces.GetN()); // 根据流ID获取目标地址
+            Ipv4Address sourceAddr = interfaces.GetAddress(flowId % interfaces.GetN());  // 根据流ID获取源地址
+            Ipv4Address destAddr = interfaces.GetAddress((flowId + 1) % interfaces.GetN());  // 根据流ID获取目标地址
 
             // 获取发送和接收时间戳
             double sendTimestamp = stat.timeFirstTxPacket.GetSeconds();
@@ -43,6 +53,10 @@ void WriteFlowMonitorDataToCSV(Ptr<FlowMonitor> monitor, double simTime, Ipv4Int
             // 计算丢包率
             double packetLossRate = (stat.txPackets > 0) ? (static_cast<double>(stat.lostPackets) / stat.txPackets) : 0.0;
 
+            // 获取当前设备的队列大小
+            uint32_t queueSize = queueSizeMap[flowId % interfaces.GetN()];  // 获取源节点的队列大小
+
+            // 将统计数据写入文件
             outputFile << flowId << ","
                        << sourceAddr << ","
                        << destAddr << ","
@@ -54,52 +68,71 @@ void WriteFlowMonitorDataToCSV(Ptr<FlowMonitor> monitor, double simTime, Ipv4Int
                        << receiveTimestamp << ","
                        << bandwidth << ","
                        << delay << ","
-                       << packetLossRate << "\n";
+                       << packetLossRate << ","
+                       << queueSize << "\n";
         }
-        outputFile.close();
+        outputFile.close();  // 关闭文件
         NS_LOG_INFO("FlowMonitor数据成功写入CSV文件。");
     } else {
         NS_LOG_ERROR("无法打开文件进行写入FlowMonitor数据。");
     }
 }
 
+// 延迟获取队列大小的函数
+void GetQueueSizeAfterSimulation(Ptr<NetDevice> device, std::map<uint32_t, uint32_t>& queueSizeMap, uint32_t nodeId) {
+    Ptr<CsmaNetDevice> csmaDevice = DynamicCast<CsmaNetDevice>(device);
+    if (csmaDevice) {
+        Ptr<Queue<Packet>> queue = csmaDevice->GetQueue();
+        if (queue) {
+            queueSizeMap[nodeId] = queue->GetNPackets();  // 获取队列大小
+            // 注释掉日志输出，以免打印队列大小到终端
+            // NS_LOG_INFO("节点 " << nodeId << " 的队列大小为: " << queueSizeMap[nodeId]);
+        }
+    }
+}
+
 int main(int argc, char *argv[]) {
     uint32_t numNodes = 50;  // 默认节点数
-    double simTime = 30;   // 默认仿真时间 1小时
+    double simTime = 120;     // 默认仿真时间 30秒
 
-    Time::SetResolution(Time::NS);
-    LogComponentEnable("RandomTopologySimulation", LOG_LEVEL_INFO);
+    Time::SetResolution(Time::NS);  // 设置时间分辨率
+    LogComponentEnable("RandomTopologySimulation", LOG_LEVEL_INFO);  // 启用日志
 
     NS_LOG_INFO("仿真开始...");
 
+    // 创建节点
     NodeContainer nodes;
     nodes.Create(numNodes);
     NS_LOG_INFO("成功创建 " << numNodes << " 个节点。");
 
+    // 配置CSMA网络
     CsmaHelper csma;
     csma.SetChannelAttribute("DataRate", StringValue("100Mbps"));
     csma.SetChannelAttribute("Delay", TimeValue(MilliSeconds(2)));
 
     NetDeviceContainer devices;
-    devices = csma.Install(nodes);
+    devices = csma.Install(nodes);  // 安装CSMA设备
     NS_LOG_INFO("成功安装CSMA网络设备。");
 
+    // 安装互联网协议栈
     InternetStackHelper internet;
     internet.Install(nodes);
     NS_LOG_INFO("成功安装Internet协议栈。");
 
+    // 配置并分配IP地址
     Ipv4AddressHelper ipv4;
     ipv4.SetBase("10.1.0.0", "255.255.255.0");
     Ipv4InterfaceContainer interfaces = ipv4.Assign(devices);
     NS_LOG_INFO("成功给节点分配IPv4地址。");
 
-    uint16_t port = 9;
+    uint16_t port = 9;  // 设置端口
     OnOffHelper onoff("ns3::TcpSocketFactory", Address());
     onoff.SetAttribute("DataRate", StringValue("500kb/s"));
     onoff.SetAttribute("PacketSize", UintegerValue(1024));
-    onoff.SetAttribute("MaxBytes", UintegerValue(0));
+    onoff.SetAttribute("MaxBytes", UintegerValue(0));  // 不限制数据量
 
     ApplicationContainer apps;
+    // 为每个节点安装应用
     for (uint32_t i = 0; i < numNodes; ++i) {
         AddressValue remoteAddress(InetSocketAddress(interfaces.GetAddress((i + 1) % numNodes), port));
         onoff.SetAttribute("Remote", remoteAddress);
@@ -107,26 +140,35 @@ int main(int argc, char *argv[]) {
 
         PacketSinkHelper sinkHelper("ns3::TcpSocketFactory", InetSocketAddress(Ipv4Address::GetAny(), port));
         ApplicationContainer sinkApp = sinkHelper.Install(nodes.Get((i + 1) % numNodes));
-        sinkApp.Start(Seconds(0.0));
-        sinkApp.Stop(Seconds(simTime));
+        sinkApp.Start(Seconds(0.0));  // 应用从仿真开始时刻启动
+        sinkApp.Stop(Seconds(simTime));  // 应用在仿真结束时停止
     }
 
-    apps.Start(Seconds(1.0));
-    apps.Stop(Seconds(simTime));
+    apps.Start(Seconds(1.0));  // 在仿真第1秒启动应用
+    apps.Stop(Seconds(simTime));  // 在仿真结束时停止应用
 
     NS_LOG_INFO("随机流量生成应用已启动。");
 
+    // 在仿真结束前1秒调度读取队列大小
+    std::map<uint32_t, uint32_t> queueSizeMap;
+    for (uint32_t i = 0; i < numNodes; ++i) {
+        Simulator::Schedule(Seconds(simTime - 1), &GetQueueSizeAfterSimulation, devices.Get(i), std::ref(queueSizeMap), i);
+    }
+
+    // 启用流量监控
     FlowMonitorHelper flowmon;
     Ptr<FlowMonitor> monitor = flowmon.InstallAll();
 
-    Simulator::Stop(Seconds(simTime));
+    Simulator::Stop(Seconds(simTime));  // 设置仿真停止时间
     NS_LOG_INFO("开始运行仿真... 总时间: " << simTime << "秒");
-    Simulator::Run();
+    Simulator::Run();  // 运行仿真
     NS_LOG_INFO("仿真完成。");
 
-    WriteFlowMonitorDataToCSV(monitor, simTime, interfaces);
+    // 将流量监控数据和队列大小写入CSV文件
+    WriteFlowMonitorDataToCSV(monitor, simTime, interfaces, queueSizeMap);
 
-    Simulator::Destroy();
+    Simulator::Destroy();  // 销毁仿真
     NS_LOG_INFO("仿真结束并销毁。");
+
     return 0;
 }
