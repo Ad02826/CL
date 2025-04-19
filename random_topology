@@ -7,6 +7,7 @@
 #include "ns3/on-off-helper.h"
 #include "ns3/packet-sink-helper.h"
 #include "ns3/drop-tail-queue.h"
+#include "ns3/random-variable-stream.h"
 #include "ns3/queue-disc.h"
 #include <fstream>
 #include <map>
@@ -92,8 +93,9 @@ void GetQueueSizeAfterSimulation(Ptr<NetDevice> device, std::map<uint32_t, uint3
 }
 
 int main(int argc, char *argv[]) {
-    uint32_t numNodes = 50;  // 默认节点数
-    double simTime = 120;     // 默认仿真时间 30秒
+    uint32_t numNodes = 10;  // 默认节点数
+    uint32_t numFlows = 500;  // 单向500，双向1k flow
+    double simTime = 0;     // 默认仿真时间 30秒
 
     Time::SetResolution(Time::NS);  // 设置时间分辨率
     LogComponentEnable("RandomTopologySimulation", LOG_LEVEL_INFO);  // 启用日志
@@ -132,14 +134,29 @@ int main(int argc, char *argv[]) {
     onoff.SetAttribute("MaxBytes", UintegerValue(0));  // 不限制数据量
 
     ApplicationContainer apps;
+    
+    // 创建UniformRandomVariable对象，用于生成随机节点对
+    Ptr<UniformRandomVariable> random = CreateObject<UniformRandomVariable>();
+    // 设置最小值和最大值
+    random->SetAttribute("Min", DoubleValue(0));  // 设置最小值为 0
+    random->SetAttribute("Max", DoubleValue(numNodes)); // 设置最大值为 49
     // 为每个节点安装应用
-    for (uint32_t i = 0; i < numNodes; ++i) {
-        AddressValue remoteAddress(InetSocketAddress(interfaces.GetAddress((i + 1) % numNodes), port));
-        onoff.SetAttribute("Remote", remoteAddress);
-        apps.Add(onoff.Install(nodes.Get(i)));
+    for (uint32_t i = 0; i < numFlows; ++i) {
 
-        PacketSinkHelper sinkHelper("ns3::TcpSocketFactory", InetSocketAddress(Ipv4Address::GetAny(), port));
-        ApplicationContainer sinkApp = sinkHelper.Install(nodes.Get((i + 1) % numNodes));
+        uint16_t dynamicPort = port + (i % numFlows);
+
+        uint32_t sourceNode = static_cast<uint32_t>(random->GetValue());
+        uint32_t destNode;
+        do 
+            destNode = static_cast<uint32_t>(random->GetValue());
+        while(sourceNode == destNode);
+
+        AddressValue remoteAddress(InetSocketAddress(interfaces.GetAddress(destNode), dynamicPort));
+        onoff.SetAttribute("Remote", remoteAddress);
+        apps.Add(onoff.Install(nodes.Get(sourceNode)));
+
+        PacketSinkHelper sinkHelper("ns3::TcpSocketFactory", InetSocketAddress(Ipv4Address::GetAny(), dynamicPort));
+        ApplicationContainer sinkApp = sinkHelper.Install(nodes.Get(destNode));
         sinkApp.Start(Seconds(0.0));  // 应用从仿真开始时刻启动
         sinkApp.Stop(Seconds(simTime));  // 应用在仿真结束时停止
     }
